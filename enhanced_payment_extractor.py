@@ -84,13 +84,9 @@ class EnhancedPaymentExtractor:
             translated_text = text
         
         # 2. ML Intent Classification
-        if self.use_ml and self.intent_classifier:
-            intent, confidence = self.intent_classifier.predict(translated_text)
-            entity.intent = intent
-            entity.confidence = confidence
-        else:
-            entity.intent = self._extract_intent_regex(translated_text)
-            entity.confidence = 0.5
+        intent, confidence = self._detect_intent(translated_text)
+        entity.intent = intent
+        entity.confidence = confidence
         
         # 3. Named Entity Recognition
         if self.use_ner and self.ner_extractor:
@@ -103,6 +99,37 @@ class EnhancedPaymentExtractor:
                 self._parse_money_from_ner(ner_entities['MONEY'][0], entity)
             if ner_entities.get('DATE'):
                 entity.date = self.date_parser.parse(ner_entities['DATE'][0], detected_lang)
+
+            slot_entities = self.ner_extractor.extract_slots(translated_text)
+            if slot_entities.get("recipient") and not entity.recipient:
+                entity.recipient = slot_entities["recipient"]
+            if slot_entities.get("amount") and not entity.amount:
+                try:
+                    entity.amount = float(slot_entities["amount"])
+                except ValueError:
+                    pass
+            if slot_entities.get("currency") and not entity.currency:
+                currency_raw = slot_entities["currency"].upper()
+                currency_map = {
+                    'DOLLARS': 'USD', 'DOLLAR': 'USD',
+                    'EUROS': 'EUR', 'EURO': 'EUR',
+                    'POUNDS': 'GBP', 'POUND': 'GBP',
+                    'RUPEES': 'INR', 'RUPEE': 'INR'
+                }
+                entity.currency = currency_map.get(currency_raw, currency_raw)
+            if slot_entities.get("source_account") and not entity.source_account:
+                entity.source_account = slot_entities["source_account"]
+            if slot_entities.get("payment_method") and not entity.payment_method:
+                entity.payment_method = slot_entities["payment_method"]
+            if slot_entities.get("transaction_id") and not entity.transaction_id:
+                entity.transaction_id = slot_entities["transaction_id"]
+            if slot_entities.get("date") and not entity.date:
+                entity.date = self.date_parser.parse(slot_entities["date"], detected_lang)
+            if slot_entities.get("count") and not entity.count:
+                try:
+                    entity.count = int(slot_entities["count"])
+                except ValueError:
+                    pass
         
         # 4. Regex Extraction (fallback or complement to NER)
         if not entity.amount:
@@ -149,12 +176,59 @@ class EnhancedPaymentExtractor:
         if detected_lang != 'en':
             text = self.translator.translate_to_english(text, detected_lang)
         
+        # Detect possible intent switch
+        detected_intent, confidence = self._detect_intent(text)
+        if self.context.history:
+            last_entity = self.context.get_last_entity()
+            if last_entity and detected_intent != IntentType.UNKNOWN and detected_intent != last_entity.intent:
+                self.context.reset()
+                switched_entity = self.parse(entity.raw_text)
+                switched_entity.metadata['intent_switched'] = True
+                switched_entity.metadata['previous_intent'] = last_entity.intent.value
+                return switched_entity
+
+        if detected_intent != IntentType.UNKNOWN:
+            entity.intent = detected_intent
+            entity.confidence = confidence
+
         # Extract new information
         entity.amount, entity.currency = self._extract_amount_currency(text)
         entity.recipient = self._extract_entity('recipient', text)
         entity.source_account = self._extract_entity('source_account', text)
         entity.payment_method = self._extract_entity('payment_method', text)
         entity.transaction_id = self._extract_entity('transaction_id', text)
+
+        if self.use_ner and self.ner_extractor:
+            slot_entities = self.ner_extractor.extract_slots(text)
+            if slot_entities.get("amount") and entity.amount is None:
+                try:
+                    entity.amount = float(slot_entities["amount"])
+                except ValueError:
+                    pass
+            if slot_entities.get("currency") and entity.currency is None:
+                currency_raw = slot_entities["currency"].upper()
+                currency_map = {
+                    'DOLLARS': 'USD', 'DOLLAR': 'USD',
+                    'EUROS': 'EUR', 'EURO': 'EUR',
+                    'POUNDS': 'GBP', 'POUND': 'GBP',
+                    'RUPEES': 'INR', 'RUPEE': 'INR'
+                }
+                entity.currency = currency_map.get(currency_raw, currency_raw)
+            if slot_entities.get("recipient") and entity.recipient is None:
+                entity.recipient = slot_entities["recipient"]
+            if slot_entities.get("source_account") and entity.source_account is None:
+                entity.source_account = slot_entities["source_account"]
+            if slot_entities.get("payment_method") and entity.payment_method is None:
+                entity.payment_method = slot_entities["payment_method"]
+            if slot_entities.get("transaction_id") and entity.transaction_id is None:
+                entity.transaction_id = slot_entities["transaction_id"]
+            if slot_entities.get("date") and entity.date is None:
+                entity.date = self.date_parser.parse(slot_entities["date"], detected_lang)
+            if slot_entities.get("count") and entity.count is None:
+                try:
+                    entity.count = int(slot_entities["count"])
+                except ValueError:
+                    pass
         
         date_str = self._extract_entity('date', text)
         if date_str:
@@ -166,8 +240,9 @@ class EnhancedPaymentExtractor:
         # Merge with last entity
         if self.context.history:
             last_entity = self.context.get_last_entity()
-            entity.intent = last_entity.intent
-            
+            if entity.intent == IntentType.UNKNOWN:
+                entity.intent = last_entity.intent
+
             # Fill from follow-up or keep from previous
             if entity.amount is None:
                 entity.amount = last_entity.amount
@@ -194,6 +269,14 @@ class EnhancedPaymentExtractor:
         self.context.add_to_history(entity)
         
         return entity
+
+    def _detect_intent(self, text: str) -> Tuple[IntentType, float]:
+        """Detect intent using ML when available, else regex rules."""
+        if self.use_ml and self.intent_classifier:
+            intent, confidence = self.intent_classifier.predict(text)
+            return intent, confidence
+
+        return self._extract_intent_regex(text), 0.5
     
     def execute_payment(self, entity: PaymentEntity) -> Dict[str, Any]:
         """
@@ -408,6 +491,10 @@ class EnhancedNLGGenerator:
         elif entity.intent == IntentType.GET_STATUS:
             return templates['status'].format(transaction_id=entity.transaction_id)
         
+        if entity.intent == IntentType.UNKNOWN:
+            return ("I can help with payments, transfers, transaction history, "
+                    "or payment status. What would you like to do?")
+
         return "I've processed your request."
     
     def generate_slot_request(self, entity: PaymentEntity, language: str = 'en') -> str:
