@@ -181,11 +181,17 @@ class EnhancedPaymentExtractor:
         if self.context.history:
             last_entity = self.context.get_last_entity()
             if last_entity and detected_intent != IntentType.UNKNOWN and detected_intent != last_entity.intent:
-                self.context.reset()
-                switched_entity = self.parse(entity.raw_text)
-                switched_entity.metadata['intent_switched'] = True
-                switched_entity.metadata['previous_intent'] = last_entity.intent.value
-                return switched_entity
+                if not last_entity.missing_slots or confidence >= 0.7:
+                    self.context.reset()
+                    switched_entity = self.parse(entity.raw_text)
+                    switched_entity.metadata['intent_switched'] = True
+                    switched_entity.metadata['previous_intent'] = last_entity.intent.value
+                    return switched_entity
+
+        if self.context.history and self.context.get_last_entity():
+            last_entity = self.context.get_last_entity()
+            if last_entity.missing_slots and detected_intent != last_entity.intent and confidence < 0.7:
+                detected_intent = IntentType.UNKNOWN
 
         if detected_intent != IntentType.UNKNOWN:
             entity.intent = detected_intent
@@ -251,7 +257,11 @@ class EnhancedPaymentExtractor:
             if entity.recipient is None:
                 entity.recipient = last_entity.recipient
             if entity.source_account is None:
-                entity.source_account = last_entity.source_account
+                if 'source_account' in last_entity.missing_slots:
+                    candidate_account = entity.raw_text.strip()
+                    entity.source_account = candidate_account if candidate_account else last_entity.source_account
+                else:
+                    entity.source_account = last_entity.source_account
             if entity.payment_method is None:
                 entity.payment_method = last_entity.payment_method
             if entity.transaction_id is None:
