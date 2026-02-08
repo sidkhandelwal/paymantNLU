@@ -231,6 +231,57 @@ class NERExtractor:
         
         # Since we can't load real models, use enhanced regex
         return self._regex_ner(text)
+
+    def extract_slots(self, text: str) -> Dict[str, Optional[str]]:
+        """Extract slot values from text using lightweight NLU heuristics."""
+        slots: Dict[str, Optional[str]] = {
+            "amount": None,
+            "currency": None,
+            "recipient": None,
+            "source_account": None,
+            "payment_method": None,
+            "transaction_id": None,
+            "date": None,
+            "count": None
+        }
+
+        money_pattern = r'(\d+(?:\.\d{2})?)\s*(USD|EUR|GBP|INR|dollars?|euros?|pounds?|rupees?)'
+        money_match = re.search(money_pattern, text, re.IGNORECASE)
+        if money_match:
+            slots["amount"] = money_match.group(1)
+            slots["currency"] = money_match.group(2)
+
+        recipient_pattern = r'(?:to|recipient|beneficiary)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'
+        recipient_match = re.search(recipient_pattern, text)
+        if recipient_match:
+            slots["recipient"] = recipient_match.group(1)
+
+        account_pattern = r'(?:from|account)\s+([A-Z][a-z]+\s+[A-Z][a-z]+|Account\s+\d+|\d{7,})'
+        account_match = re.search(account_pattern, text, re.IGNORECASE)
+        if account_match:
+            slots["source_account"] = account_match.group(1)
+
+        method_pattern = r'(?:using|via|through)\s+([A-Z][a-z]+(?:Payment)?)'
+        method_match = re.search(method_pattern, text, re.IGNORECASE)
+        if method_match:
+            slots["payment_method"] = method_match.group(1)
+
+        transaction_pattern = r'(?:Payment\s+|transaction\s+|ID\s+)?([A-Z]{2}\s*\d{9,})'
+        transaction_match = re.search(transaction_pattern, text, re.IGNORECASE)
+        if transaction_match:
+            slots["transaction_id"] = transaction_match.group(1).strip()
+
+        date_pattern = r'(tomorrow|today|yesterday|next\s+\w+|\d{4}-\d{2}-\d{2})'
+        date_match = re.search(date_pattern, text, re.IGNORECASE)
+        if date_match:
+            slots["date"] = date_match.group(1)
+
+        count_pattern = r'(?:last|recent)\s+(\d+)'
+        count_match = re.search(count_pattern, text, re.IGNORECASE)
+        if count_match:
+            slots["count"] = count_match.group(1)
+
+        return slots
     
     def _regex_ner(self, text: str) -> Dict[str, List[str]]:
         """Regex-based NER as fallback"""
@@ -631,6 +682,12 @@ class ContextManager:
             entity.payment_method = last_entity.payment_method
         
         return entity
+
+    def reset(self):
+        """Clear conversation history and pending context."""
+        self.history = []
+        self.current_entity = None
+        self.pending_slots = []
 
 
 # Export all classes
