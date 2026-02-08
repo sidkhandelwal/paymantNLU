@@ -1,7 +1,7 @@
 # Advanced Payment Entity Extraction System - Requirements
 
 # Core ML and NLP
-spacy>=3.5.0
+spacy>=3.7.2
 transformers>=4.30.0
 torch>=2.0.0
 scikit-learn>=1.3.0
